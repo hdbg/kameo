@@ -524,7 +524,7 @@ impl Messages {
         enum_def
     }
 
-    fn expand_response_enum(&self, name: syn::Ident, include_reply_impl: bool) -> proc_macro2::TokenStream {
+    fn expand_response_enum(&self, name: syn::Ident, generate_reply_impl: bool) -> proc_macro2::TokenStream {
         let vis = match self.message_enum_visibility() {
             Ok(vis) => vis,
             Err(err) => return err.into_compile_error(),
@@ -600,7 +600,7 @@ impl Messages {
 
         let (enum_def, enum_generics) = builder.finish(vis, name.clone(), variants);
 
-        if !include_reply_impl {
+        if !generate_reply_impl {
             return enum_def;
         }
 
@@ -697,9 +697,12 @@ impl Messages {
 
             // For methods that accept a `ctx` parameter, create an inner context with the
             // correct reply type and propagate the stop flag back afterwards.
+            // The fork type matches the method's return type (`()` for unit returns) because
+            // `__internal_fork` is parameterised by the inner context's Reply type.
             let (ctx_setup, ctx_propagate) = if let Some((_ctx_ident, ctx_pos)) = ctx {
                 let fork_type = non_unit_return(&sig.output)
                     .map(|ty| quote! { #ty })
+                    // Methods with a unit/default return are paired with a `Context<_, ()>`.
                     .unwrap_or_else(|| quote! { () });
                 params.insert(*ctx_pos, quote! { &mut __inner_ctx });
                 (
@@ -764,12 +767,12 @@ impl ToTokens for Messages {
             .clone()
             .map(|name| self.expand_msg_enum(name));
         let msg_impl_message = self.expand_msg_impls();
-        let both_enums = self.args.messages.is_some() && self.args.replies.is_some();
+        let has_both_message_and_reply_enums = self.args.messages.is_some() && self.args.replies.is_some();
         let response_enum = self
             .args
             .replies
             .clone()
-            .map(|name| self.expand_response_enum(name, both_enums));
+            .map(|name| self.expand_response_enum(name, has_both_message_and_reply_enums));
         let msg_enum_impl = self
             .args
             .messages
