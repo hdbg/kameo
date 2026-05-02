@@ -367,7 +367,7 @@ where
     #[doc(hidden)]
     pub fn __internal_fork<R2>(&self) -> Context<A, R2>
     where
-        R2: Reply<Value = R2> + ?Sized,
+        R2: AggregatableReply + ?Sized,
     {
         Context {
             actor_ref: self.actor_ref.clone(),
@@ -459,3 +459,12 @@ where
     }
 }
 
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be used as a reply type in `#[messages(enum)]`",
+    label = "this reply type doesn't satisfy `Reply<Value = Self>`",
+    note = "`DelegatedReply` and `ForwardedReply` are not compatible with enum dispatch",
+    note = "to fix: remove `enum` from `#[messages(enum)]`, or change the return type to a plain value"
+)]
+pub trait AggregatableReply: Reply<Value = Self> {}
+impl<T> AggregatableReply for T where T: Reply<Value = T> {}

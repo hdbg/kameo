@@ -732,6 +732,18 @@ impl Messages {
         // Match arms use plain `Message::handle` so Rust infers the concrete
         // message type from the pattern — no explicit generic args needed,
         // which avoids issues with type params renamed by EnumBuilder.
+        let reply_assertions = messages.iter().filter_map(|message| {
+            non_unit_return(&message.sig.output).map(|return_ty| {
+                let span = return_ty.span();
+                quote_spanned! { span =>
+                    {
+                        fn __assert_aggregatable_reply<T: ::kameo::message::AggregatableReply>() {}
+                        __assert_aggregatable_reply::<#return_ty>();
+                    }
+                }
+            })
+        });
+
         let match_arms = messages.iter().map(|message| {
             let Message {
                 sig,
@@ -786,6 +798,7 @@ impl Messages {
                     msg: #msg_enum_name #msg_enum_ty_generics,
                     ctx: &mut ::kameo::message::Context<Self, Self::Reply>,
                 ) -> Self::Reply {
+                    #( #reply_assertions )*
                     match msg {
                         #( #match_arms )*
                     }
