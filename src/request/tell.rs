@@ -101,6 +101,17 @@ where
             );
         }
 
+        // A bounded `tell` parks the sender until the mailbox has room; record that as a
+        // wait-for edge so the console can surface mailbox-capacity deadlocks. An unbounded
+        // send never waits, so it's left uninstrumented.
+        #[cfg(feature = "console")]
+        let _wait = tx.capacity().is_some().then(|| {
+            crate::console::registry::begin_wait(
+                self.actor_ref.id(),
+                crate::console::wire::WaitKind::Tell,
+            )
+        });
+
         match self.mailbox_timeout.into() {
             Some(timeout) => Ok(tx.send_timeout(signal, timeout).await?),
             None => Ok(tx.send(signal).await?),
@@ -846,13 +857,10 @@ mod tests {
         let actor_ref = MyActor::spawn_with_mailbox(MyActor, mailbox::bounded(1));
         actor_ref.wait_for_startup().await;
         // We need enough messages to both (a) occupy the actor (sleeping 5s
-        // in the handler) and (b) fill the bounded channel.  Without hotpath
-        // the channel capacity is 1, so 2 messages suffice: the first is
-        // dequeued by the actor after the 2ms yield, the second stays queued.
-        #[cfg(not(feature = "hotpath"))]
+        // in the handler) and (b) fill the bounded channel. The channel
+        // capacity is 1, so 2 messages suffice: the first is dequeued by the
+        // actor after the 2ms yield, the second stays queued.
         let fill_count = 2;
-        #[cfg(feature = "hotpath")]
-        let fill_count = 4;
         for _ in 0..fill_count {
             assert_eq!(actor_ref.tell(Msg).try_send(), Ok(()));
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -898,31 +906,29 @@ mod tests {
             }
         }
 
+        tokio::time::pause();
         let actor_ref = MyActor::spawn_with_mailbox(MyActor, mailbox::bounded(1));
-        // Mailbox is empty, this will make there be one item in the mailbox
-        #[cfg(not(feature = "hotpath"))]
-        let fill_count = 1;
-        #[cfg(feature = "hotpath")]
-        let fill_count = 4;
-        for _ in 0..fill_count {
-            assert_eq!(
-                actor_ref
-                    .tell(Sleep(Duration::from_millis(100)))
-                    .mailbox_timeout(Duration::from_millis(10))
-                    .send()
-                    .await,
-                Ok(())
-            );
+        actor_ref.wait_for_startup().await;
+        // The handler sleep must be longer than the mailbox timeout: tokio's test runtime
+        // auto-advances to the next timer when all tasks are blocked, so if the actor's sleep
+        // fires before the mailbox timeout the actor drains the buffer and the send succeeds.
+        let handler_sleep = Duration::from_secs(5);
+        for _ in 0..2 {
+            assert_eq!(actor_ref.tell(Sleep(handler_sleep)).try_send(), Ok(()));
+            tokio::time::advance(Duration::from_millis(1)).await;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        // Finally, this one will fail because there's one item in the mailbox already.
-        assert_eq!(
-            actor_ref
-                .tell(Sleep(Duration::from_millis(100)))
+        let actor_ref2 = actor_ref.clone();
+        let timeout_task = tokio::spawn(async move {
+            actor_ref2
+                .tell(Sleep(handler_sleep))
                 .mailbox_timeout(Duration::from_millis(50))
                 .send()
-                .await,
-            Err(SendError::Timeout(Some(Sleep(Duration::from_millis(100)))))
+                .await
+        });
+        tokio::time::advance(Duration::from_millis(51)).await;
+        assert_eq!(
+            timeout_task.await?,
+            Err(SendError::Timeout(Some(Sleep(handler_sleep))))
         );
         actor_ref.kill();
 
