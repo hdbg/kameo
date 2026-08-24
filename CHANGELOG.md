@@ -5,6 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.2](https://github.com/tqwewe/kameo/compare/v0.22.1...v0.22.2) - 2026-07-17
+
+### <!-- 3 -->Fixed
+
+- Make `actor.handle_message` a root span linked to `actor.lifecycle` ([#382](https://github.com/tqwewe/kameo/pull/382)) [</>](https://github.com/tqwewe/kameo/commit/1315c811994d6ded956c4f821438a8e5f63e3556)
+
+### <!-- 4 -->Documentation
+
+- Clarify `ActorStopReason::Panicked` covers hook errors, add `PanicError::is_panic` ([#375](https://github.com/tqwewe/kameo/pull/375)) [</>](https://github.com/tqwewe/kameo/commit/0dff64a050d59738422b1fec43866cc57df7f923)
+
+
+## [0.22.1](https://github.com/tqwewe/kameo/compare/v0.22.0...v0.22.1) - 2026-07-07
+
+### <!-- 5 -->Misc
+
+- Update hotpath ([#371](https://github.com/tqwewe/kameo/pull/371)) [</>](https://github.com/tqwewe/kameo/commit/78123d7b341690d4b4f3e0f7cd1e9ddcadcdd364)
+
+
+## [0.22.0](https://github.com/tqwewe/kameo/compare/v0.21.1...v0.22.0) - 2026-07-05
+
+### <!-- 0 -->Added
+
+- Add on_undelivered hook for messages left in the mailbox at terminal stop ([#363](https://github.com/tqwewe/kameo/pull/363)) [</>](https://github.com/tqwewe/kameo/commit/c1c14b95f0efe41c532345438802c19cc9d8d19c)
+- Reject new messages after stop_gracefully instead of silently dropping them ([#362](https://github.com/tqwewe/kameo/pull/362)) [</>](https://github.com/tqwewe/kameo/commit/e8a0bce041af295eb3c013be08b5282fda4d9b7b)
+- **BREAKING:** Add `ctx.pipe` and `ctx.pipe_with` for pipe-to-self ([#360](https://github.com/tqwewe/kameo/pull/360)) [</>](https://github.com/tqwewe/kameo/commit/4d897f2c5418fd0b297bd3fbfe49f174c382b3d1)
+
+### <!-- 1 -->Changed
+
+- **BREAKING:** Make `ActorRef` cloning a single `Arc` clone ([#365](https://github.com/tqwewe/kameo/pull/365)) [</>](https://github.com/tqwewe/kameo/commit/39018860114723a86c705b37c62ae3d3c0511426)
+- **BREAKING:** Return pending ask's message as ActorRestarting/ActorNotRunning during drain ([#359](https://github.com/tqwewe/kameo/pull/359)) [</>](https://github.com/tqwewe/kameo/commit/4e0594abbb550ccb679e9c696d2393a4907184fb)
+
+### <!-- 3 -->Fixed
+
+- Deliver leftover tells to on_undelivered when the restart budget is exhausted ([#364](https://github.com/tqwewe/kameo/pull/364)) [</>](https://github.com/tqwewe/kameo/commit/77feb7a5e5c1ab2cfde9ab20242af5c0ea71d0c3)
+
+### <!-- 4 -->Documentation
+
+- Fix spacing between sponsor avatars in README [</>](https://github.com/tqwewe/kameo/commit/c75376967806c8c22fb4f6e3b559b08e798167b4)
+
+
+## [0.21.1](https://github.com/tqwewe/kameo/compare/v0.21.0...v0.21.1) - 2026-07-01
+
+### <!-- 0 -->Added
+
+- Add per-actor default reply timeout via PreparedActor ([#354](https://github.com/tqwewe/kameo/pull/354)) [</>](https://github.com/tqwewe/kameo/commit/0750d5a731669f6d473c441afc79fc7835f7a954)
+
+### <!-- 1 -->Changed
+
+- Drop all messages during drain instead of buffering tells and processing asks ([#351](https://github.com/tqwewe/kameo/pull/351)) [</>](https://github.com/tqwewe/kameo/commit/3e01df19aa6d9424b18322dcaeb44cfce82eb7cc)
+- Disable cargo http multiplexing to avoid crates.io HTTP/2 framing errors [</>](https://github.com/tqwewe/kameo/commit/80448a29d41d147ccf6907985aa48d7ce8db063f)
+- Increase cargo net retry to ride out crates.io HTTP/2 flakes [</>](https://github.com/tqwewe/kameo/commit/63f6f0c69bf10913bd38bb9ff0783357f743f398)
+
+### <!-- 3 -->Fixed
+
+- De-flake scheduler interval doctest [</>](https://github.com/tqwewe/kameo/commit/293d11d1e005783884727df9236e45d40521883a)
+- Skip and simplify bounded mailbox tests under hotpath feature [</>](https://github.com/tqwewe/kameo/commit/53984d756a10983fc54c0debc569a8fd8a192435)
+- Use deterministic fake time for bounded mailbox unit tests [</>](https://github.com/tqwewe/kameo/commit/970b977def985a7165844de212f0b6d215e251c5)
+
+### <!-- 5 -->Misc
+
+- Automate releases with release-plz ([#352](https://github.com/tqwewe/kameo/pull/352)) [</>](https://github.com/tqwewe/kameo/commit/71eda0e3139e5a453ec885b96ccc8c8c1ab1a31d)
+
+
+## [0.21.0] - 2026-06-21
+
+* @npry made their first contribution in #340
+
+* @manuelarte made their first contribution in #342
+
+* @getong made their first contribution in #339
+
+* @marcoradocchia made their first contribution in #338
+
+* @CleverWild made their first contribution in #321
+
+### <!-- 0 -->Added
+
+- **BREAKING:** Support error chains on `SendError` (#338)
+- Add clippy allow attribute to methods tagged with #[message] to ensure compatibility with `clippy::pedantic` (#321)
+- Add live actor-system monitoring console TUI (#343)
+
+### <!-- 3 -->Fixed
+
+- Deadlocks in `ActorRef` lifecycle methods, catch panics in actor shutdown (#340)
+- Preserve pending mailbox messages on actor stop/restart (#345)
+- Prevent actor.handle_message spans from nesting unboundedly on self-sends (#346)
+
+### <!-- 4 -->Documentation
+
+- Update supervision page to cover new parent supervision (#315)
+- Add haruki-nikaidou to sponsors [</>](https://github.com/tqwewe/kameo/commit/aa23f66902501fd17fb8e3debbda0483f6bb4c54)
+
+### <!-- 5 -->Misc
+
+- Fix link in CHANGELOG.md [</>](https://github.com/tqwewe/kameo/commit/27bed764dba99f16995c8064c35f01bb75aedad4)
+- Update hotpath requirement from 0.11 to 0.14 (#319)
+- Update hotpath requirement from 0.11 to 0.15 (#324)
+- Update hotpath requirement from 0.11 to 0.16 (#326)
+- Update opentelemetry requirement from 0.31 to 0.32 (#327)
+- Update hotpath requirement from 0.11 to 0.16 (#328)
+- Update opentelemetry requirement from 0.31 to 0.32 (#329)
+- Update hotpath requirement from 0.11 to 0.17 (#337)
+- Update tracing-opentelemetry requirement from 0.32 to 0.33 (#332)
+- Update opentelemetry requirement from 0.31 to 0.32 (#330)
+- Use libp2p::identity instead of libp2p_identity directly (#339)
+- Fix typos (#342)
+
 ## [0.20.0] - 2026-04-07
 
 * @Janrupf made their first contribution in #309
@@ -103,26 +210,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add ignore_tags regex to cliff.toml [</>](https://github.com/tqwewe/kameo/commit/e4577f7e3ebda92cdc98013be56e356139c86ede)
 - Bump kameo to version 0.19.1 [</>](https://github.com/tqwewe/kameo/commit/2d6033a1c3ad9003f338e4fb40070125c27cfa86)
-
-## [0.19.1] - 2025-11-13
-
-### <!-- 3 -->Fixed
-
-- Docs.rs builds failing due to now unsupported `doc_auto_cfg` feature [</>](https://github.com/tqwewe/kameo/commit/cc934e59483d32527336748eb010bbf26130ef98)
-
-### <!-- 4 -->Documentation
-
-- Add 0.19.0 link to CHANGELOG.md [</>](https://github.com/tqwewe/kameo/commit/8670c85f672eb41dd054a4b736e73baaaab9c2f0)
-
-### <!-- 5 -->Misc
-
-- Add ignore_tags regex to cliff.toml [</>](https://github.com/tqwewe/kameo/commit/e4577f7e3ebda92cdc98013be56e356139c86ede)
-- Bump kameo to version 0.19.1 [</>](https://github.com/tqwewe/kameo/commit/2d6033a1c3ad9003f338e4fb40070125c27cfa86)
-
-## [0.19.1] - 2025-11-13
-
-### <!-- 5 -->Misc
-
 - Bump kameo_actors to version 0.4.0 [</>](https://github.com/tqwewe/kameo/commit/fcfaf75ee574a5be3f8fc6911a7f757930c53ad6)
 
 ## [0.19.0] - 2025-11-10
@@ -840,6 +927,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add support for stable rust [</>](https://github.com/tqwewe/kameo/commit/0d3e66c47ab04d435bf44c356b1e0ff53f78e43e)
 
+[0.21.0]: https://github.com/tqwewe/kameo/compare/v0.20.0..v0.21.0
 [0.20.0]: https://github.com/tqwewe/kameo/compare/v0.19.2..v0.20.0
 [0.19.2]: https://github.com/tqwewe/kameo/compare/v0.19.1..v0.19.2
 [0.19.1]: https://github.com/tqwewe/kameo/compare/v0.19.0..v0.19.1

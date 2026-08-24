@@ -1,4 +1,7 @@
-use std::{convert, ops::ControlFlow, panic::AssertUnwindSafe, sync::Arc, thread};
+use std::{
+    collections::VecDeque, convert, ops::ControlFlow, panic::AssertUnwindSafe, sync::Arc, thread,
+    time::Duration,
+};
 
 use futures::{
     FutureExt,
@@ -20,6 +23,7 @@ use crate::{
     error::{ActorStopReason, PanicError, PanicReason, SendError, invoke_actor_error_hook},
     links::Links,
     mailbox::{MailboxReceiver, MailboxSender, Signal},
+    message::BoxMessage,
 };
 
 use super::ActorId;
@@ -36,6 +40,8 @@ pub struct PreparedActor<A: Actor> {
     actor_ref: ActorRef<A>,
     mailbox_rx: MailboxReceiver<A>,
     abort_registration: AbortRegistration,
+    #[cfg(feature = "console")]
+    monitor: Arc<crate::console::registry::ActorMonitor>,
 }
 
 impl<A: Actor> PreparedActor<A> {
@@ -70,18 +76,41 @@ impl<A: Actor> PreparedActor<A> {
             shutdown_result,
         );
 
+        #[cfg(feature = "console")]
+        let monitor = crate::console::registry::register_or_get(&actor_ref);
+
         PreparedActor {
             actor_ref,
             mailbox_rx,
             abort_registration,
+            #[cfg(feature = "console")]
+            monitor,
         }
     }
 
     /// Returns a reference to the [`ActorRef`], which can be used to send messages to the actor.
     ///
     /// The `ActorRef` can be used for interaction before the actor starts processing its event loop.
+    ///
+    /// Note: if you intend to configure a [default reply timeout](PreparedActor::reply_timeout),
+    /// do so before cloning the ref out, as the value is read off the clone at the time it's made.
     pub fn actor_ref(&self) -> &ActorRef<A> {
         &self.actor_ref
+    }
+
+    /// Sets a default reply timeout applied to every `ask` request that doesn't specify its own.
+    ///
+    /// An `ask` whose handler doesn't reply within this duration resolves with a timeout error
+    /// instead of waiting forever. A timeout set at the call site with
+    /// [`AskRequest::reply_timeout`](crate::request::AskRequest::reply_timeout) always takes
+    /// precedence over this default. The default applies to async `ask` requests; the blocking
+    /// variants are unaffected.
+    ///
+    /// Configure this before cloning the [`ActorRef`] out (see [`PreparedActor::actor_ref`]),
+    /// otherwise the clone won't observe the default.
+    pub fn reply_timeout(mut self, duration: Duration) -> Self {
+        self.actor_ref.set_default_reply_timeout(Some(duration));
+        self
     }
 
     /// Runs the actor in the current context **without** spawning a separate task, until the actor is stopped.
@@ -121,6 +150,8 @@ impl<A: Actor> PreparedActor<A> {
             self.actor_ref,
             self.mailbox_rx,
             self.abort_registration,
+            #[cfg(feature = "console")]
+            self.monitor,
         )
         .await
     }
@@ -170,6 +201,7 @@ async fn run_actor_lifecycle<A>(
     actor_ref: ActorRef<A>,
     mut mailbox_rx: MailboxReceiver<A>,
     abort_registration: AbortRegistration,
+    #[cfg(feature = "console")] monitor: Arc<crate::console::registry::ActorMonitor>,
 ) -> Result<(A, ActorStopReason), PanicError>
 where
     A: Actor,
@@ -177,6 +209,9 @@ where
     #[allow(unused_mut)]
     let mut id = actor_ref.id();
     let name = A::name();
+
+    #[cfg(feature = "console")]
+    let monitor_scope = Arc::clone(&monitor);
 
     let task = async move {
         #[cfg(feature = "tracing")]
@@ -199,32 +234,57 @@ where
             Ok(actor) => {
                 let mut state = ActorBehaviour::new_from_actor(actor, actor_ref.clone());
 
+                #[cfg(feature = "console")]
+                monitor.set_running();
+
                 let reason = Abortable::new(
                     abortable_actor_loop(
                         &mut state,
                         &mut mailbox_rx,
                         &actor_ref.startup_result,
                         startup_finished,
+                        #[cfg(feature = "console")]
+                        &monitor,
                     ),
                     abort_registration,
                 )
                 .await
                 .unwrap_or(ActorStopReason::Killed);
 
-                let mut actor = state.shutdown().await;
+                #[cfg(feature = "console")]
+                monitor.set_stopping();
 
+                let mut actor = state.shutdown().await;
                 actor_ref.links.set_children_parent_shutdown().await;
                 actor_ref.links.send_children_shutdown().await;
-                {
-                    let wait = actor_ref.links.wait_children_closed();
-                    tokio::pin!(wait);
-                    loop {
-                        tokio::select! {
-                            _ = &mut wait => break,
-                            _ = mailbox_rx.recv() => {}
+                let is_restarting = actor_ref.links.lock().await.will_restart(&reason);
+                drain_until_children_closed(&actor_ref.links, &mut mailbox_rx, is_restarting).await;
+
+                // On a terminal stop (not a restart, where the mailbox is reused by the next
+                // incarnation) hand any leftover tells to `on_undelivered` before `notify_links`
+                // drops them.
+                if !is_restarting {
+                    let undelivered = drain_undelivered(&mut mailbox_rx);
+                    if !undelivered.is_empty() {
+                        let res =
+                            AssertUnwindSafe(actor.on_undelivered(reason.clone(), undelivered))
+                                .catch_unwind()
+                                .await
+                                .map(|res| {
+                                    res.map_err(|err| {
+                                        PanicError::new(Box::new(err), PanicReason::OnUndelivered)
+                                    })
+                                })
+                                .map_err(|err| {
+                                    PanicError::new_from_panic_any(err, PanicReason::OnUndelivered)
+                                })
+                                .and_then(convert::identity);
+                        if let Err(err) = res {
+                            invoke_actor_error_hook(&err);
                         }
                     }
                 }
+
                 actor_ref
                     .links
                     .lock()
@@ -232,7 +292,18 @@ where
                     .notify_links(id, reason.clone(), mailbox_rx);
 
                 log_actor_stop_reason(id, name, &reason);
-                let on_stop_res = actor.on_stop(actor_ref.clone(), reason.clone()).await;
+                let on_stop_res =
+                    AssertUnwindSafe(actor.on_stop(actor_ref.clone(), reason.clone()))
+                        .catch_unwind()
+                        .await
+                        .map(|res| {
+                            res.map_err(|err| PanicError::new(Box::new(err), PanicReason::OnStop))
+                        })
+                        .map_err(|err| PanicError::new_from_panic_any(err, PanicReason::OnStop))
+                        .and_then(convert::identity);
+
+                #[cfg(feature = "console")]
+                monitor.set_stopped(&reason);
 
                 unregister_actor(&id).await;
 
@@ -244,7 +315,6 @@ where
                             .expect("nothing else should set the shutdown result");
                     }
                     Err(err) => {
-                        let err = PanicError::new(Box::new(err), PanicReason::OnStop);
                         invoke_actor_error_hook(&err);
 
                         actor_ref
@@ -267,21 +337,17 @@ where
 
                 actor_ref.links.set_children_parent_shutdown().await;
                 actor_ref.links.send_children_shutdown().await;
-                {
-                    let wait = actor_ref.links.wait_children_closed();
-                    tokio::pin!(wait);
-                    loop {
-                        tokio::select! {
-                            _ = &mut wait => break,
-                            _ = mailbox_rx.recv() => {}
-                        }
-                    }
-                }
+                // startup failed; the supervisor may still restart us per policy
+                let is_restarting = actor_ref.links.lock().await.will_restart(&reason);
+                drain_until_children_closed(&actor_ref.links, &mut mailbox_rx, is_restarting).await;
                 actor_ref
                     .links
                     .lock()
                     .await
                     .notify_links(id, reason.clone(), mailbox_rx);
+
+                #[cfg(feature = "console")]
+                monitor.set_stopped(&reason);
 
                 unregister_actor(&id).await;
 
@@ -299,6 +365,9 @@ where
         }
     };
 
+    #[cfg(feature = "console")]
+    let task = crate::console::registry::with_monitor(monitor_scope, task);
+
     #[cfg(not(feature = "tracing"))]
     {
         task.await
@@ -311,11 +380,84 @@ where
     }
 }
 
+/// Keeps the mailbox drained while waiting for supervised children to close their channels,
+/// preventing a child's notification from deadlocking on a full mailbox. Tells consumed during
+/// this window are preserved and re-queued so they survive a supervisor restart. Asks are bounced
+/// back to their caller with the original message so nothing queued is silently dropped: on a
+/// restart the caller receives `ActorRestarting` (safe to retry against the new incarnation), on a
+/// terminal stop `ActorNotRunning`. Either way any child awaiting a reply is unblocked so it can
+/// finish shutting down.
+async fn drain_until_children_closed<A>(
+    links: &Links,
+    mailbox_rx: &mut MailboxReceiver<A>,
+    is_restarting: bool,
+) where
+    A: Actor,
+{
+    let mut preserved = VecDeque::new();
+    let wait = links.wait_children_closed();
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut wait => break,
+            signal = mailbox_rx.recv() => match signal {
+                // tell: preserve for the restart
+                Some(signal @ Signal::Message { reply: None, .. }) => preserved.push_back(signal),
+                // ask: bounce the message back so it isn't dropped; label it by whether we expect
+                // to restart (`ActorRestarting`, retry-safe) or stop for good (`ActorNotRunning`)
+                Some(Signal::Message { reply: Some(tx), message, .. }) => {
+                    let err = if is_restarting {
+                        SendError::ActorRestarting(message.as_any())
+                    } else {
+                        SendError::ActorNotRunning(message.as_any())
+                    };
+                    let _ = tx.send(Err(err));
+                }
+                // lifecycle / link-died signals during our own teardown: discard
+                Some(_) => {}
+                None => break,
+            }
+        }
+    }
+    mailbox_rx.push_front(preserved);
+}
+
+/// Drains every message remaining in the mailbox on a terminal stop, returning the leftover tells
+/// for [`Actor::on_undelivered`]. Straggler asks are bounced back to their caller with the original
+/// message (`ActorNotRunning`), mirroring [`drain_until_children_closed`], so they aren't handed to
+/// the hook or silently dropped.
+fn drain_undelivered<A>(mailbox_rx: &mut MailboxReceiver<A>) -> Vec<BoxMessage<A>>
+where
+    A: Actor,
+{
+    let mut undelivered = Vec::new();
+    while let Ok(signal) = mailbox_rx.try_recv() {
+        match signal {
+            Signal::Message {
+                message,
+                reply: None,
+                ..
+            } => undelivered.push(message),
+            Signal::Message {
+                message,
+                reply: Some(tx),
+                ..
+            } => {
+                let _ = tx.send(Err(SendError::ActorNotRunning(message.as_any())));
+            }
+            _ => {}
+        }
+    }
+    undelivered
+}
+
 async fn abortable_actor_loop<A>(
     state: &mut ActorBehaviour<A>,
     mailbox_rx: &mut MailboxReceiver<A>,
     startup_result: &SetOnce<Result<(), PanicError>>,
     startup_finished: bool,
+    #[cfg(feature = "console")] monitor: &Arc<crate::console::registry::ActorMonitor>,
 ) -> ActorStopReason
 where
     A: Actor,
@@ -324,7 +466,14 @@ where
         return reason;
     }
     loop {
-        let reason = recv_mailbox_loop(state, mailbox_rx, startup_result).await;
+        let reason = recv_mailbox_loop(
+            state,
+            mailbox_rx,
+            startup_result,
+            #[cfg(feature = "console")]
+            monitor,
+        )
+        .await;
         if let ControlFlow::Break(reason) = state.on_shutdown(reason).await {
             return reason;
         }
@@ -335,12 +484,23 @@ async fn recv_mailbox_loop<A>(
     state: &mut ActorBehaviour<A>,
     mailbox_rx: &mut MailboxReceiver<A>,
     startup_result: &SetOnce<Result<(), PanicError>>,
+    #[cfg(feature = "console")] monitor: &Arc<crate::console::registry::ActorMonitor>,
 ) -> ActorStopReason
 where
     A: Actor,
 {
     loop {
-        match state.next(mailbox_rx).await {
+        let next = state.next(mailbox_rx).await;
+
+        #[cfg(feature = "console")]
+        {
+            monitor.set_mailbox_len(mailbox_rx.len());
+            if let ControlFlow::Continue(signal) = &next {
+                monitor.record_received(signal);
+            }
+        }
+
+        match next {
             ControlFlow::Continue(Signal::StartupFinished) => {
                 if startup_result.set(Ok(())).is_err() {
                     #[cfg(feature = "tracing")]
@@ -359,7 +519,9 @@ where
                 #[cfg(feature = "tracing")]
                 caller_span,
             }) => {
-                if let ControlFlow::Break(reason) = state
+                #[cfg(feature = "console")]
+                monitor.begin_handler(message_name);
+                let result = state
                     .handle_message(
                         message,
                         actor_ref,
@@ -369,8 +531,10 @@ where
                         #[cfg(feature = "tracing")]
                         caller_span,
                     )
-                    .await
-                {
+                    .await;
+                #[cfg(feature = "console")]
+                monitor.end_handler();
+                if let ControlFlow::Break(reason) = result {
                     return reason;
                 }
             }
@@ -389,6 +553,15 @@ where
             }
             ControlFlow::Continue(Signal::Stop | Signal::SupervisorRestart) => {
                 if let ControlFlow::Break(reason) = state.handle_stop().await {
+                    return reason;
+                }
+            }
+            ControlFlow::Continue(Signal::Callback {
+                actor_ref,
+                callback,
+            }) => {
+                if let ControlFlow::Break(reason) = state.handle_callback(actor_ref, callback).await
+                {
                     return reason;
                 }
             }
